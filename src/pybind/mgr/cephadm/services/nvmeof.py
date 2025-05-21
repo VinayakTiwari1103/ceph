@@ -86,6 +86,12 @@ class NvmeofService(CephService):
         # Indicate to the daemon whether to utilize huge pages
         if spec.spdk_mem_size:
             daemon_spec.extra_files['spdk_mem_size'] = str(spec.spdk_mem_size)
+        elif spec.spdk_huge_pages:
+            try:
+                huge_pages_value = int(spec.spdk_huge_pages)
+                daemon_spec.extra_files['spdk_huge_pages'] = str(huge_pages_value)
+            except ValueError:
+                logger.error(f"Invalid value for SPDK huge pages: {spec.spdk_huge_pages}")
 
         if spec.enable_auth:
             if (
@@ -245,18 +251,15 @@ class NvmeofService(CephService):
             self.mgr.log.error(f"Unable to send monitor command {cmd}, error {err}")
 
     def get_blocking_daemon_hosts(self, service_name: str) -> List[HostSpec]:
-        # we should not deploy nvmeof daemons on hosts that have nvmeof daemons
-        # from services with a different "group" attribute (as recommended by
-        # the nvmeof team)
+        # we should not deploy nvmeof daemons on hosts that already have nvmeof daemons
         spec = cast(NvmeofServiceSpec, self.mgr.spec_store[service_name].spec)
-        nvmeof_group = cast(NvmeofServiceSpec, spec).group
         blocking_daemons: List[DaemonDescription] = []
-        other_group_nvmeof_services = [
+        other_nvmeof_services = [
             nspec for nspec in self.mgr.spec_store.get_specs_by_type('nvmeof').values()
-            if cast(NvmeofServiceSpec, nspec).group != nvmeof_group
+            if nspec.service_name() != spec.service_name()
         ]
-        for other_group_nvmeof_service in other_group_nvmeof_services:
-            blocking_daemons += self.mgr.cache.get_daemons_by_service(other_group_nvmeof_service.service_name())
+        for other_nvmeof_service in other_nvmeof_services:
+            blocking_daemons += self.mgr.cache.get_daemons_by_service(other_nvmeof_service.service_name())
         blocking_daemon_hosts = [
             HostSpec(hostname=blocking_daemon.hostname)
             for blocking_daemon in blocking_daemons if blocking_daemon.hostname is not None

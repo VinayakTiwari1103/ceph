@@ -80,10 +80,15 @@ struct OMapInnerNode
     if (is_rewrite() && !is_btree_root()) {
       auto &prior = *get_prior_instance()->template cast<OMapInnerNode>();
       if (prior.base_child_t::has_parent_tracker()) {
+        assert(prior.is_seen_by_users());
 	// unlike fixed-kv nodes, rewriting child nodes of the omap tree
 	// won't affect parent nodes, so we have to manually take prior
 	// instances' parent trackers here.
 	this->child_node_t::take_parent_from_prior();
+      } else {
+        // dirty omap extent may not be accessed yet during rewrite,
+        // this means the extent may not be initalized yet as linked.
+        assert(!prior.is_seen_by_users());
       }
     }
   }
@@ -147,6 +152,12 @@ struct OMapInnerNode
     const std::string &key,
     const ceph::bufferlist &value) final;
 
+  bool exceeds_max_kv_limit(
+    const std::string &key,
+    const ceph::bufferlist &value) const final {
+    return (key.length() + sizeof(laddr_le_t)) > (capacity() / 4);
+  }
+
   rm_key_ret rm_key(
     omap_context_t oc,
     const std::string &key) final;
@@ -182,7 +193,8 @@ struct OMapInnerNode
     omap_context_t oc,
     internal_const_iterator_t iter, OMapNodeRef entry);
 
-  using handle_split_iertr = base_iertr;
+  using handle_split_iertr = base_iertr::extend<
+    crimson::ct_error::value_too_large>;
   using handle_split_ret = handle_split_iertr::future<mutation_result_t>;
   handle_split_ret handle_split(
     omap_context_t oc, internal_const_iterator_t iter,
@@ -231,6 +243,7 @@ struct OMapInnerNode
     if (this->is_valid()
 	&& !this->is_pending()
 	&& !this->is_btree_root()
+	// dirty omap extent may not be accessed/linked yet
 	&& this->base_child_t::has_parent_tracker()) {
       this->child_node_t::destroy();
     }
@@ -282,10 +295,15 @@ struct OMapLeafNode
     if (is_rewrite() && !is_btree_root()) {
       auto &prior = *get_prior_instance()->template cast<OMapLeafNode>();
       if (prior.base_child_t::has_parent_tracker()) {
+        assert(prior.is_seen_by_users());
 	// unlike fixed-kv nodes, rewriting child nodes of the omap tree
 	// won't affect parent nodes, so we have to manually take prior
 	// instances' parent trackers here.
 	this->child_node_t::take_parent_from_prior();
+      } else {
+        // dirty omap extent may not be accessed yet during rewrite,
+        // this means the extent may not be initalized yet as linked.
+        assert(!prior.is_seen_by_users());
       }
     }
   }
@@ -303,6 +321,7 @@ struct OMapLeafNode
     if (this->is_valid()
 	&& !this->is_pending()
 	&& !this->is_btree_root()
+	// dirty omap extent may not be accessed/linked yet
 	&& this->base_child_t::has_parent_tracker()) {
       this->child_node_t::destroy();
     }
@@ -352,6 +371,12 @@ struct OMapLeafNode
     omap_context_t oc,
     const std::string &key,
     const ceph::bufferlist &value) final;
+
+  bool exceeds_max_kv_limit(
+    const std::string &key,
+    const ceph::bufferlist &value) const final {
+    return (key.length() + value.length()) > (capacity() / 4);
+  }
 
   rm_key_ret rm_key(
     omap_context_t oc, const std::string &key) final;
@@ -434,14 +459,15 @@ omap_load_extent(
     oc.t, laddr, size,
     [begin=std::move(begin), end=std::move(end), FNAME,
     oc, chp=std::move(chp)](T &extent) mutable {
+      assert(!extent.is_seen_by_users());
       extent.init_range(std::move(begin), std::move(end));
-      if (extent.T::base_child_t::is_parent_valid()
-	  || extent.is_btree_root()) {
-	return;
+      if (extent.is_btree_root()) {
+        return;
       }
-      assert(chp);
       SUBDEBUGT(seastore_omap, "linking {} to {}",
-	oc.t, extent, *chp->get_parent());
+        oc.t, extent, *chp->get_parent());
+      assert(chp);
+      assert(!extent.T::base_child_t::is_parent_valid());
       chp->link_child(&extent);
     }
   ).handle_error_interruptible(

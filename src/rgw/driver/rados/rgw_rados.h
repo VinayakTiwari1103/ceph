@@ -208,7 +208,7 @@ public:
   RGWObjStateManifest *get_state(const rgw_obj& obj);
 
   void set_compressed(const rgw_obj& obj);
-  void set_atomic(const rgw_obj& obj);
+  void set_atomic(const rgw_obj& obj, bool atomic);
   void set_prefetch_data(const rgw_obj& obj);
   void invalidate(const rgw_obj& obj);
 };
@@ -595,11 +595,11 @@ public:
   CephContext *ctx() { return cct; }
   /** do all necessary setup of the storage device */
   int init_begin(CephContext *_cct, const DoutPrefixProvider *dpp,
-                 bool background_tasks, const rgw::SiteConfig& site);
+                 bool background_tasks, const rgw::SiteConfig& site, rgw::sal::ConfigStore* cfgstore);
   /** Initialize the RADOS instance and prepare to do other ops */
-  int init_svc(bool raw, const DoutPrefixProvider *dpp, bool background_tasks, const rgw::SiteConfig& site);
+  int init_svc(bool raw, const DoutPrefixProvider *dpp, bool background_tasks, const rgw::SiteConfig& site, rgw::sal::ConfigStore* cfgstore);
   virtual int init_rados();
-  int init_complete(const DoutPrefixProvider *dpp, optional_yield y);
+  int init_complete(const DoutPrefixProvider *dpp, optional_yield y, rgw::sal::ConfigStore* cfgstore);
   void finalize();
 
   int register_to_service_map(const DoutPrefixProvider *dpp, const std::string& daemon_type, const std::map<std::string, std::string>& meta);
@@ -1129,7 +1129,7 @@ public:
 
   int stat_remote_obj(const DoutPrefixProvider *dpp,
                RGWObjectCtx& obj_ctx,
-               const rgw_user& user_id,
+               const rgw_owner* user_id,
                req_info *info,
                const rgw_zone_id& source_zone,
                const rgw_obj& src_obj,
@@ -1148,7 +1148,8 @@ public:
                std::string *petag, optional_yield y);
 
   int fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
-                       const rgw_user& user_id,
+                       const rgw_owner* user_id,
+                       const rgw_user* perm_check_uid,
                        req_info *info,
                        const rgw_zone_id& source_zone,
                        const rgw_obj& dest_obj,
@@ -1179,7 +1180,8 @@ public:
                        const rgw_obj& stat_dest_obj,
                        std::optional<rgw_zone_set_entry> source_trace_entry,
                        rgw_zone_set *zones_trace = nullptr,
-                       std::optional<uint64_t>* bytes_transferred = 0);
+                       std::optional<uint64_t>* bytes_transferred = 0,
+                       bool keep_tags = true);
   /**
    * Copy an object.
    * dest_obj: the object to copy into
@@ -1457,9 +1459,9 @@ int restore_obj_from_cloud(RGWLCCloudTierCtx& tier_ctx,
   int append_async(const DoutPrefixProvider *dpp, rgw_raw_obj& obj, size_t size, bufferlist& bl);
 
 public:
-  void set_atomic(void *ctx, const rgw_obj& obj) {
+  void set_atomic(void *ctx, const rgw_obj& obj, bool atomic) {
     RGWObjectCtx *rctx = static_cast<RGWObjectCtx *>(ctx);
-    rctx->set_atomic(obj);
+    rctx->set_atomic(obj, atomic);
   }
   void set_prefetch_data(void *ctx, const rgw_obj& obj) {
     RGWObjectCtx *rctx = static_cast<RGWObjectCtx *>(ctx);

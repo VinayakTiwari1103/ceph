@@ -21,6 +21,21 @@ if(WITH_JAEGER)
 endif()
 
 if(WITH_RADOSGW_D4N)
+add_executable(ceph_test_rgw_d4n_filter
+  test_d4n_filter.cc
+  )
+target_include_directories(ceph_test_rgw_d4n_filter
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/d4n")
+target_link_libraries(ceph_test_rgw_d4n_filter PRIVATE
+  rgw_common
+  librados
+  ceph-common
+  ${rgw_libs}
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+  )
+install(TARGETS ceph_test_rgw_d4n_filter DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 add_executable(ceph_test_rgw_d4n_directory
   test_d4n_directory.cc
   )
@@ -372,3 +387,22 @@ target_link_libraries(ceph_test_datalog
   ${UNITTEST_LIBS}
   ${rgw_libs})
 install(TARGETS ceph_test_datalog DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+if(WITH_CATCH2)
+ add_executable(unittest_rgw_hex
+  test_rgw_hex.cc)
+
+ target_include_directories(unittest_rgw_hex
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
+
+ target_link_libraries(unittest_rgw_hex 
+  rgw_common
+  librados
+  ceph-common
+  ${rgw_libs}
+  ${EXTRALIBS}
+  Catch2WithMain)
+
+ add_ceph_unittest(unittest_rgw_hex)
+
+endif(WITH_CATCH2)

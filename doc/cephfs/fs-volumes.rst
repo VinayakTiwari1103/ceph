@@ -287,7 +287,7 @@ Use a command of the following form to create a subvolume:
 
 .. prompt:: bash #
 
-   ceph fs subvolume create <vol_name> <subvol_name> [--size <size_in_bytes>] [--group_name <subvol_group_name>] [--pool_layout <data_pool_name>] [--uid <uid>] [--gid <gid>] [--mode <octal_mode>] [--namespace-isolated] [--earmark <earmark>] [--normalization <form>] [--case-insensitive]
+   ceph fs subvolume create <vol_name> <subvol_name> [--size <size_in_bytes>] [--group_name <subvol_group_name>] [--pool_layout <data_pool_name>] [--uid <uid>] [--gid <gid>] [--mode <octal_mode>] [--namespace-isolated] [--earmark <earmark>] [--normalization <form>] [--casesensitive <bool>]
 
 
 The command succeeds even if the subvolume already exists.
@@ -344,11 +344,11 @@ The valid values for the unicode normalization form are:
 To learn more about unicode normalization forms see https://unicode.org/reports/tr15
 
 It's also possible to configure a subvolume for case insensitive access when
-the ``--case-insensitive`` option is used. When this option is added, file
+the ``--casesensitive=0`` option is used. When this option is added, file
 names that only differ in the case of its characters will be mapped to the same
 file. The case of the file name used when the file was created is preserved.
 
-.. note:: Setting ``--case-insensitive`` option implicitly enables
+.. note:: Setting ``--casesensitive=0`` option implicitly enables
    unicode normalization on the subvolume.
 
 Removing a subvolume
@@ -1624,7 +1624,7 @@ Before resorting to a measure as drastic as this, it is a good idea to try less
 drastic measures and then assess if the file system experience has improved due
 to it. One example of such less drastic measure is to disable asynchronous
 threads launched by volumes plugins for cloning and purging trash. For details
-on these see: :ref:`pause-purge-threads` and :ref:`pause-clone-threads`.
+on these see: :ref:`Pause Purge threads<pause-purge-threads>` and :ref:`Pause Clone Threads<pause-clone-threads>`.
 
 
 .. _manila: https://github.com/openstack/manila

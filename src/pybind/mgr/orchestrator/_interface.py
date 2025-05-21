@@ -454,6 +454,14 @@ class Orchestrator(object):
         """
         raise NotImplementedError()
 
+    def stop_drain_host(self, hostname: str) -> OrchResult[str]:
+        """
+        stop draining daemons of a host
+
+        :param hostname: hostname
+        """
+        raise NotImplementedError()
+
     def update_host_addr(self, host: str, addr: str) -> OrchResult[str]:
         """
         Update a host's address
@@ -737,7 +745,7 @@ class Orchestrator(object):
         # assert action in ["start", "stop", "reload, "restart", "redeploy"]
         raise NotImplementedError()
 
-    def create_osds(self, drive_group: DriveGroupSpec) -> OrchResult[str]:
+    def create_osds(self, drive_group: DriveGroupSpec, skip_validation: bool = False) -> OrchResult[str]:
         """
         Create one or more OSDs within a single Drive Group.
 

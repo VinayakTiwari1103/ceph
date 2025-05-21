@@ -252,10 +252,10 @@ void RGWObjectCtx::set_compressed(const rgw_obj& obj) {
   objs_state[obj].state.compressed = true;
 }
 
-void RGWObjectCtx::set_atomic(const rgw_obj& obj) {
+void RGWObjectCtx::set_atomic(const rgw_obj& obj, bool atomic) {
   std::unique_lock wl{lock};
   assert (!obj.empty());
-  objs_state[obj].state.is_atomic = true;
+  objs_state[obj].state.is_atomic = atomic;
 }
 void RGWObjectCtx::set_prefetch_data(const rgw_obj& obj) {
   std::unique_lock wl{lock};
@@ -362,6 +362,7 @@ void *RGWRadosThread::Worker::entry() {
 
   do {
     auto start = ceph::real_clock::now();
+
     int r = processor->process(this);
     if (r < 0) {
       ldpp_dout(this, 0) << "ERROR: processor->process() returned error r=" << r << dendl;
@@ -482,6 +483,7 @@ public:
 class RGWMetaSyncProcessorThread : public RGWSyncProcessorThread
 {
   RGWMetaSyncStatusManager sync;
+  rgw::sal::ConfigStore *cfgstore{nullptr};
 
   uint64_t interval_msec() override {
     return 0; /* no interval associated, it'll run once until stopped */
@@ -490,8 +492,9 @@ class RGWMetaSyncProcessorThread : public RGWSyncProcessorThread
     sync.stop();
   }
 public:
-  RGWMetaSyncProcessorThread(rgw::sal::RadosStore* _driver, RGWAsyncRadosProcessor *async_rados)
-    : RGWSyncProcessorThread(_driver->getRados(), "meta-sync"), sync(_driver, async_rados) {}
+  RGWMetaSyncProcessorThread(rgw::sal::RadosStore* _driver, RGWAsyncRadosProcessor *async_rados,
+                             rgw::sal::ConfigStore *_cfgstore)
+    : RGWSyncProcessorThread(_driver->getRados(), "meta-sync"), sync(_driver, async_rados), cfgstore(_cfgstore) {}
 
   void wakeup_sync_shards(set<int>& shard_ids) {
     for (set<int>::iterator iter = shard_ids.begin(); iter != shard_ids.end(); ++iter) {
@@ -510,7 +513,7 @@ public:
   }
 
   int process(const DoutPrefixProvider *dpp) override {
-    sync.run(dpp, null_yield);
+    sync.run(dpp, null_yield, cfgstore);
     return 0;
   }
 };
@@ -520,6 +523,7 @@ class RGWDataSyncProcessorThread : public RGWSyncProcessorThread
   PerfCountersRef counters;
   RGWDataSyncStatusManager sync;
   bool initialized;
+  rgw::sal::ConfigStore *cfgstore{nullptr};
 
   uint64_t interval_msec() override {
     if (initialized) {
@@ -534,11 +538,11 @@ class RGWDataSyncProcessorThread : public RGWSyncProcessorThread
   }
 public:
   RGWDataSyncProcessorThread(rgw::sal::RadosStore* _driver, RGWAsyncRadosProcessor *async_rados,
-                             const RGWZone* source_zone)
+                             const RGWZone* source_zone, rgw::sal::ConfigStore *_cfgstore)
     : RGWSyncProcessorThread(_driver->getRados(), "data-sync"),
       counters(sync_counters::build(store->ctx(), std::string("data-sync-from-") + source_zone->name)),
       sync(_driver, async_rados, source_zone->id, counters.get()),
-      initialized(false) {}
+      initialized(false), cfgstore(_cfgstore) {}
 
   void wakeup_sync_shards(bc::flat_map<int, bc::flat_set<rgw_data_notify_entry> >& entries) {
     for (bc::flat_map<int, bc::flat_set<rgw_data_notify_entry> >::iterator iter = entries.begin(); iter != entries.end(); ++iter) {
@@ -565,7 +569,7 @@ public:
       /* we'll be back! */
       return 0;
     }
-    sync.run(dpp);
+    sync.run(dpp, cfgstore);
     return 0;
   }
 };
@@ -1219,7 +1223,7 @@ int RGWRados::update_service_map(const DoutPrefixProvider *dpp, std::map<std::st
  * Initialize the RADOS instance and prepare to do other ops
  * Returns 0 on success, -ERR# on failure.
  */
-int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y)
+int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y, rgw::sal::ConfigStore* cfgstore)
 {
   int ret;
 
@@ -1303,7 +1307,7 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y)
     }
     auto async_processor = svc.async_processor;
     std::lock_guard l{meta_sync_thread_lock};
-    meta_sync_processor_thread = new RGWMetaSyncProcessorThread(this->driver, async_processor);
+    meta_sync_processor_thread = new RGWMetaSyncProcessorThread(this->driver, async_processor, cfgstore);
     ret = meta_sync_processor_thread->init(dpp);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "ERROR: failed to initialize meta sync thread" << dendl;
@@ -1326,7 +1330,7 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y)
     std::lock_guard dl{data_sync_thread_lock};
     for (auto source_zone : svc.zone->get_data_sync_source_zones()) {
       ldpp_dout(dpp, 5) << "starting data sync thread for zone " << source_zone->name << dendl;
-      auto *thread = new RGWDataSyncProcessorThread(this->driver, svc.async_processor, source_zone);
+      auto *thread = new RGWDataSyncProcessorThread(this->driver, svc.async_processor, source_zone, cfgstore);
       ret = thread->init(dpp);
       if (ret < 0) {
         ldpp_dout(dpp, 0) << "ERROR: failed to initialize data sync thread" << dendl;
@@ -1418,14 +1422,14 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y)
 }
 
 int RGWRados::init_svc(bool raw, const DoutPrefixProvider *dpp,
-		       bool background_tasks, // Ignored when `raw`
-                       const rgw::SiteConfig& site)
+           bool background_tasks, // Ignored when `raw`
+           const rgw::SiteConfig& site, rgw::sal::ConfigStore* cfgstore)
 {
   if (raw) {
-    return svc.init_raw(cct, driver, use_cache, null_yield, dpp, site);
+    return svc.init_raw(cct, driver, use_cache, null_yield, dpp, site, cfgstore);
   }
 
-  return svc.init(cct, driver, use_cache, run_sync_thread, background_tasks, null_yield, dpp, site);
+  return svc.init(cct, driver, use_cache, run_sync_thread, background_tasks, null_yield, dpp, site, cfgstore);
 }
 
 /** 
@@ -1434,7 +1438,7 @@ int RGWRados::init_svc(bool raw, const DoutPrefixProvider *dpp,
  */
 int RGWRados::init_begin(CephContext* _cct, const DoutPrefixProvider *dpp,
 			 bool background_tasks,
-                         const rgw::SiteConfig& site)
+       const rgw::SiteConfig& site, rgw::sal::ConfigStore* cfgstore)
 {
   set_context(_cct);
   int ret = driver->init_neorados(dpp);
@@ -1448,7 +1452,7 @@ int RGWRados::init_begin(CephContext* _cct, const DoutPrefixProvider *dpp,
     return ret;
   }
 
-  ret = init_svc(false, dpp, background_tasks, site);
+  ret = init_svc(false, dpp, background_tasks, site, cfgstore);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: failed to init services (ret=" << cpp_strerror(-ret) << ")" << dendl;
     return ret;
@@ -2463,7 +2467,7 @@ int RGWRados::create_bucket(const DoutPrefixProvider* dpp,
     if (ret == -EEXIST) {
        /* we need to reread the info and return it, caller will have a use for it */
       RGWBucketInfo orig_info;
-      int r = get_bucket_info(&svc, bucket.tenant, bucket.name, orig_info, NULL, y, NULL);
+      int r = get_bucket_info(&svc, bucket.tenant, bucket.name, orig_info, NULL, y, dpp);
       if (r < 0) {
         if (r == -ENOENT) {
           continue;
@@ -2959,7 +2963,7 @@ int RGWRados::swift_versioning_copy(RGWObjectCtx& obj_ctx,
     return 0;
   }
 
-  obj_ctx.set_atomic(obj);
+  obj_ctx.set_atomic(obj, true);
 
   RGWObjState * state = nullptr;
   RGWObjManifest *manifest = nullptr;
@@ -2999,7 +3003,7 @@ int RGWRados::swift_versioning_copy(RGWObjectCtx& obj_ctx,
     gen_rand_obj_instance_name(&dest_obj);
   }
 
-  obj_ctx.set_atomic(dest_obj);
+  obj_ctx.set_atomic(dest_obj, true);
 
   rgw_zone_id no_zone;
 
@@ -3100,8 +3104,8 @@ int RGWRados::swift_versioning_restore(RGWObjectCtx& obj_ctx,
       gen_rand_obj_instance_name(&obj);
     }
 
-    obj_ctx.set_atomic(archive_obj);
-    obj_ctx.set_atomic(obj);
+    obj_ctx.set_atomic(archive_obj, true);
+    obj_ctx.set_atomic(obj, true);
 
     jspan_context no_trace{false, false};
 
@@ -3509,7 +3513,6 @@ class RGWRadosPutObj : public RGWHTTPStreamRWRequest::ReceiveCB
 {
   const DoutPrefixProvider *dpp;
   CephContext* cct;
-  rgw_obj obj;
   rgw::sal::DataProcessor *filter;
   boost::optional<RGWPutObj_Compress>& compressor;
   bool try_etag_verify;
@@ -3528,6 +3531,18 @@ class RGWRadosPutObj : public RGWHTTPStreamRWRequest::ReceiveCB
   uint64_t ofs{0};
   uint64_t lofs{0}; /* logical ofs */
   std::function<int(map<string, bufferlist>&)> attrs_handler;
+  /*
+    src_bucket_perms, if provided, serves as a fallback mechanism to validate the
+    source bucket's ACL before initiating the fetch operation. It ensures
+    backward compatibility with legacy implementations where the `rgwx-perm-check-uid`
+    arg might not be honored, and the destination zone does not return the
+    `x-rgw-perm-checked` header, which confirms that the source object's
+    permissions were validated against the specified `rgwx-perm-check-uid`.
+
+    @todo drop src_bucket_perms and src_obj in T+2 release.
+  */
+ const rgw_obj& src_obj;
+ const std::optional<RGWUserPermHandler::Bucket>& src_bucket_perms;
 
 public:
   RGWRadosPutObj(const DoutPrefixProvider *dpp,
@@ -3537,7 +3552,9 @@ public:
                  rgw::sal::ObjectProcessor *p,
                  void (*_progress_cb)(off_t, void *),
                  void *_progress_data,
-                 std::function<int(map<string, bufferlist>&)> _attrs_handler) :
+                 std::function<int(map<string, bufferlist>&)> _attrs_handler,
+                 const rgw_obj& src_obj,
+                 const std::optional<RGWUserPermHandler::Bucket>& _src_bucket_perms = std::nullopt) :
                        dpp(dpp),
                        cct(cct),
                        filter(p),
@@ -3547,7 +3564,9 @@ public:
                        processor(p),
                        progress_cb(_progress_cb),
                        progress_data(_progress_data),
-                       attrs_handler(_attrs_handler) {}
+                       attrs_handler(_attrs_handler),
+                       src_obj(src_obj),
+                       src_bucket_perms(_src_bucket_perms) {}
 
 
   int process_attrs(void) {
@@ -3729,6 +3748,23 @@ public:
     } else {
       return "";
     }
+  }
+
+  int handle_headers(const map<string, string>& headers, int http_status) override {
+    if (src_bucket_perms && http_status != 403 && http_status != 401) {
+      auto iter = headers.find("RGWX_PERM_CHECKED");
+      // if the header is not present, we need to check the ACL
+      // of the source bucket against the fallback UID
+      if (iter == headers.end()) {
+        // old ACL should still win s3:ReplicateObject
+        if (!src_bucket_perms->verify_bucket_permission(src_obj.key, rgw::IAM::s3ReplicateObject)) {
+          ldpp_dout(dpp, 4) << "ERROR: " << __func__ << "(): fallback permission check denied" << dendl;
+          return -EACCES;
+        }
+      }
+    }
+
+    return 0;
   }
 };
 
@@ -4140,7 +4176,7 @@ public:
 
 int RGWRados::stat_remote_obj(const DoutPrefixProvider *dpp,
                RGWObjectCtx& obj_ctx,
-               const rgw_user& user_id,
+               const rgw_owner* user_id,
                req_info *info,
                const rgw_zone_id& source_zone,
                const rgw_obj& src_obj,
@@ -4208,11 +4244,11 @@ int RGWRados::stat_remote_obj(const DoutPrefixProvider *dpp,
 
   static constexpr int NUM_ENPOINT_IOERROR_RETRIES = 20;
   for (int tries = 0; tries < NUM_ENPOINT_IOERROR_RETRIES; tries++) {
-    int ret = conn->get_obj(dpp, user_id, info, src_obj, pmod, unmod_ptr,
-                        dest_mtime_weight.zone_short_id, dest_mtime_weight.pg_ver,
-                        prepend_meta, get_op, rgwx_stat,
-                        sync_manifest, skip_decrypt, nullptr, sync_cloudtiered,
-                        true, &cb, &in_stream_req);
+    int ret = conn->get_obj(dpp, user_id, nullptr, info, src_obj, pmod, unmod_ptr,
+                            dest_mtime_weight.zone_short_id, dest_mtime_weight.pg_ver,
+                            prepend_meta, get_op, rgwx_stat,
+                            sync_manifest, skip_decrypt, nullptr, sync_cloudtiered,
+                            true, &cb, &in_stream_req);
     if (ret < 0) {
       return ret;
     }
@@ -4288,7 +4324,8 @@ int RGWFetchObjFilter_Default::filter(CephContext *cct,
 }
 
 int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
-               const rgw_user& user_id,
+               const rgw_owner* user_id,
+               const rgw_user* perm_check_uid,
                req_info *info,
                const rgw_zone_id& source_zone,
                const rgw_obj& dest_obj,
@@ -4319,7 +4356,8 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
                const rgw_obj& stat_dest_obj,
                std::optional<rgw_zone_set_entry> source_trace_entry,
                rgw_zone_set *zones_trace,
-               std::optional<uint64_t>* bytes_transferred)
+               std::optional<uint64_t>* bytes_transferred,
+               bool keep_tags)
 {
   /* source is in a different zonegroup, copy from there */
 
@@ -4379,6 +4417,32 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
 
   std::optional<rgw_user> override_owner;
 
+  // load src bucket perm handler for backward compatibility
+  // @todo drop me in t+2 release.
+  std::optional<RGWUserPermHandler::Bucket> src_bucket_perms;
+  if (perm_check_uid) {
+    std::unique_ptr<rgw::sal::Bucket> src_bucket;
+    ret = driver->load_bucket(rctx.dpp, src_obj.bucket, &src_bucket, rctx.y);
+    if (ret < 0) {
+      ldpp_dout(rctx.dpp, 0) << "ERROR: failed to load src bucket=" << src_obj << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    RGWUserPermHandler user_perms(rctx.dpp, driver, cct, *perm_check_uid);
+    ret = user_perms.init();
+    if (ret < 0) {
+      ldpp_dout(rctx.dpp, 0) << "ERROR: failed to init user perms for: " << src_obj << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    src_bucket_perms.emplace();
+    ret = user_perms.init_bucket(src_bucket->get_info(), src_bucket->get_attrs(), &*src_bucket_perms);
+    if (ret < 0) {
+      ldpp_dout(rctx.dpp, 0) << "ERROR: failed to init bucket perms for: " << src_obj << " ret=" << ret << dendl;
+      return ret;
+    }
+  }
+
   RGWRadosPutObj cb(rctx.dpp, cct, plugin, compressor, &processor, progress_cb, progress_data,
                     [&](map<string, bufferlist>& obj_attrs) {
                       const rgw_placement_rule *ptail_rule;
@@ -4412,7 +4476,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
                         return ret;
                       }
                       return 0;
-                    });
+                    }, src_obj, src_bucket_perms);
 
   string etag;
   real_time set_mtime;
@@ -4447,7 +4511,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
 
   static constexpr int NUM_ENPOINT_IOERROR_RETRIES = 20;
   for (int tries = 0; tries < NUM_ENPOINT_IOERROR_RETRIES; tries++) {
-    ret = conn->get_obj(rctx.dpp, user_id, info, src_obj, pmod, unmod_ptr,
+    ret = conn->get_obj(rctx.dpp, user_id, perm_check_uid, info, src_obj, pmod, unmod_ptr,
                         dest_mtime_weight.zone_short_id, dest_mtime_weight.pg_ver, prepend_meta, get_op, rgwx_stat,
                         sync_manifest, skip_decrypt, &dst_zone_trace,
                         sync_cloudtiered, true,
@@ -4598,6 +4662,10 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
     set_copy_attrs(cb.get_attrs(), attrs, attrs_mod);
   } else {
     attrs = cb.get_attrs();
+  }
+
+  if (!keep_tags) {
+    attrs.erase(RGW_ATTR_TAGS);
   }
 
   if (copy_if_newer) {
@@ -4826,7 +4894,8 @@ int RGWRados::copy_obj(RGWObjectCtx& src_obj_ctx,
     // response to the frontend socket. call fetch_remote_obj() synchronously so
     // that only one thread tries to suspend that coroutine
     const req_context rctx{dpp, null_yield, nullptr};
-    return fetch_remote_obj(dest_obj_ctx, remote_user, info, source_zone,
+    const rgw_owner remote_user_owner(remote_user);
+    return fetch_remote_obj(dest_obj_ctx, &remote_user_owner, &remote_user, info, source_zone,
                dest_obj, src_obj, dest_bucket_info, &src_bucket_info,
                dest_placement, src_mtime, mtime, mod_ptr,
                unmod_ptr, high_precision_time,
@@ -5229,7 +5298,7 @@ int RGWRados::transition_obj(RGWObjectCtx& obj_ctx,
   real_time read_mtime;
   uint64_t obj_size;
 
-  obj_ctx.set_atomic(obj);
+  obj_ctx.set_atomic(obj, true);
   RGWRados::Object op_target(this, bucket_info, obj_ctx, obj);
   RGWRados::Object::Read read_op(&op_target);
 
@@ -5342,7 +5411,7 @@ int RGWRados::restore_obj_from_cloud(RGWLCCloudTierCtx& tier_ctx,
                       }
                       cb_processed = true;
                       return 0;
-                    });
+                    }, dest_obj);
 
   // fetch mtime of the object and other attrs of the object
   // to check for restore_status
@@ -6030,7 +6099,7 @@ static int resync_encrypted_multipart(const DoutPrefixProvider* dpp,
                                       const RGWObjState& state)
 {
   // only overwrite if the tag hasn't changed
-  obj_ctx.set_atomic(state.obj);
+  obj_ctx.set_atomic(state.obj, true);
 
   // make a tiny adjustment to the existing mtime so that fetch_remote_obj()
   // won't return ERR_NOT_MODIFIED when resyncing the object
@@ -6582,6 +6651,11 @@ int RGWRados::get_olh_target_state(const DoutPrefixProvider *dpp, RGWObjectCtx&
                                obj, &target, y); /* might return -EAGAIN */
   if (r < 0) {
     return r;
+  }
+
+  // if prefetch was requested, apply it to the target too
+  if (olh_state->prefetch_data) {
+    obj_ctx.set_prefetch_data(target);
   }
 
   return get_obj_state(dpp, &obj_ctx, bucket_info, target, psm, false, y);
@@ -7955,6 +8029,10 @@ int RGWRados::Object::Read::iterate(const DoutPrefixProvider *dpp, int64_t ofs, 
 
   auto aio = rgw::make_throttle(window_size, y);
   get_obj_data data(store, cb, &*aio, ofs, y);
+
+  if (state.obj.empty()) {
+    state.obj = source->get_obj();
+  }
 
   int r = store->iterate_obj(dpp, source->get_ctx(), source->get_bucket_info(), state.obj,
                              ofs, end, chunk_size, _get_obj_iterate_cb, &data, y);

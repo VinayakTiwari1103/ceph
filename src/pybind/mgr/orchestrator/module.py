@@ -690,6 +690,13 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
+    @_cli_write_command('orch host drain stop')
+    def _stop_drain_host(self, hostname: str) -> HandleCommandResult:
+        """drain all daemons from a host"""
+        completion = self.stop_drain_host(hostname)
+        raise_if_exception(completion)
+        return HandleCommandResult(stdout=completion.result_str())
+
     @_cli_write_command('orch host set-addr')
     def _update_set_addr(self, hostname: str, addr: str) -> HandleCommandResult:
         """Update a host address"""
@@ -1515,7 +1522,8 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     @_cli_write_command('orch daemon add osd')
     def _daemon_add_osd(self,
                         svc_arg: Optional[str] = None,
-                        method: Optional[OSDMethod] = None) -> HandleCommandResult:
+                        method: Optional[OSDMethod] = None,
+                        skip_validation: bool = False) -> HandleCommandResult:
         """Create OSD daemon(s) on specified host and device(s) (e.g., ceph orch daemon add osd myhost:/dev/sdb)"""
         # Create one or more OSDs"""
 
@@ -1570,7 +1578,7 @@ Usage:
             msg = f"Invalid 'host:device' spec: '{svc_arg}': {e}" + usage
             return HandleCommandResult(-errno.EINVAL, stderr=msg)
 
-        completion = self.create_osds(drive_group)
+        completion = self.create_osds(drive_group, skip_validation)
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -2296,6 +2304,12 @@ Usage:
     @_cli_write_command('orch resume')
     def _resume(self) -> HandleCommandResult:
         """Resume orchestrator background work (if paused)"""
+        self.resume()
+        return HandleCommandResult()
+
+    @_cli_write_command('orch unpause')
+    def _unpause(self) -> HandleCommandResult:
+        """Alias to orch resume"""
         self.resume()
         return HandleCommandResult()
 

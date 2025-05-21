@@ -97,7 +97,7 @@ from .inventory import (
 from .upgrade import CephadmUpgrade
 from .template import TemplateMgr
 from .utils import CEPH_IMAGE_TYPES, RESCHEDULE_FROM_OFFLINE_HOSTS_TYPES, forall_hosts, \
-    cephadmNoImage, CEPH_UPGRADE_ORDER, SpecialHostLabels
+    cephadmNoImage, SpecialHostLabels
 from .configchecks import CephadmConfigChecks
 from .offline_watcher import OfflineHostWatcher
 from .tuned_profiles import TunedProfileUtils
@@ -2667,7 +2667,7 @@ Then run the following:
             raise OrchestratorError(
                 f'Unable to schedule redeploy for {daemon_name}: No standby MGRs')
 
-        if action == 'restart' and not force:
+        if action in ['restart', 'stop'] and not force:
             r = service_registry.get_service(daemon_type_to_service(
                 d.daemon_type)).ok_to_stop([d.daemon_id], force=False)
             if r.retval:
@@ -2988,8 +2988,45 @@ Then run the following:
         self.spec_store.save(osd_default_spec)
         self.apply([osd_default_spec])
 
+    def validate_device(self, host_name: str, drive_group: DriveGroupSpec) -> str:
+        """
+        Validates whether the specified device exists and is available for OSD creation.
+        Returns:
+            str: An error message if validation fails; an empty string if validation passes.
+        """
+        try:
+
+            if not drive_group.data_devices or not drive_group.data_devices.paths:
+                return "Error: No data devices specified."
+
+            if self.cache.is_host_unreachable(host_name):
+                return f"Host {host_name} is not reachable (it may be offline or in maintenance mode)."
+
+            host_cache = self.cache.devices.get(host_name, [])
+            if not host_cache:
+                return (f"Error: No devices found for host {host_name}. "
+                        "You can check known devices with 'ceph orch device ls'. "
+                        "If no devices appear, wait for an automatic refresh.")
+
+            available_devices = {
+                dev.path: dev for dev in host_cache if dev.available
+            }
+            self.log.debug(f"Host {host_name} has {len(available_devices)} available devices.")
+
+            for device in drive_group.data_devices.paths:
+                matching_device = next((dev for dev in host_cache if dev.path == device.path), None)
+                if not matching_device:
+                    return f"Error: Device {device.path} is not found on host {host_name}"
+                if not matching_device.available:
+                    return (f"Error: Device {device.path} is present but unavailable for OSD creation. "
+                            f"Reason: {', '.join(matching_device.rejected_reasons) if matching_device.rejected_reasons else 'Unknown'}")
+
+            return ""
+        except AttributeError as e:
+            return f"Error- Attribute issue: {e}"
+
     @handle_orch_error
-    def create_osds(self, drive_group: DriveGroupSpec) -> str:
+    def create_osds(self, drive_group: DriveGroupSpec, skip_validation: bool = False) -> str:
         hosts: List[HostSpec] = self.inventory.all_specs()
         filtered_hosts: List[str] = drive_group.placement.filter_matching_hostspecs(hosts)
         if not filtered_hosts:
@@ -3003,6 +3040,12 @@ Then run the following:
             self.create_osd_default_spec(drive_group)
         else:
             self.log.info("osd.default already exists.")
+        host_name = filtered_hosts[0]
+        if not skip_validation:
+            self.log.warning("Skipping the validation of device paths for osd daemon add command. Please make sure that the osd path is valid")
+            err_msg = self.validate_device(host_name, drive_group)
+            if err_msg:
+                return err_msg
 
         return self.osd_service.create_from_spec(drive_group)
 
@@ -3913,9 +3956,9 @@ Then run the following:
             raise OrchestratorError('--daemon-types and --services are mutually exclusive')
         if daemon_types is not None:
             for dtype in daemon_types:
-                if dtype not in CEPH_UPGRADE_ORDER:
+                if dtype not in utils.CEPH_IMAGE_TYPES:
                     raise OrchestratorError(f'Upgrade aborted - Got unexpected daemon type "{dtype}".\n'
-                                            f'Viable daemon types for this command are: {utils.CEPH_TYPES + utils.GATEWAY_TYPES}')
+                                            f'Viable daemon types for this command are: {utils.CEPH_IMAGE_TYPES}')
         if services is not None:
             for service in services:
                 if service not in self.spec_store:
@@ -4160,6 +4203,18 @@ Then run the following:
             daemons_table += "{:<20} {:<15}\n".format(d.daemon_type, d.daemon_id)
 
         return "Scheduled to remove the following daemons from host '{}'\n{}".format(hostname, daemons_table)
+
+    @handle_orch_error
+    @host_exists()
+    def stop_drain_host(self, hostname: str) -> str:
+        if not self.inventory.has_label(hostname, '_no_schedule'):
+            raise OrchestratorValidationError(f'The host {hostname} is currently not draining.')
+        self.remove_host_label(hostname, '_no_schedule')
+        self.remove_host_label(hostname, SpecialHostLabels.DRAIN_CONF_KEYRING)
+        # stop osd removal for the host osds which are in to_remove_osds queue
+        osds = [d.daemon_id for d in self.cache.get_daemons_by_type('osd', hostname)]
+        self.stop_remove_osds(osds)
+        return f'Stopped host drain for {hostname}'
 
     def trigger_connect_dashboard_rgw(self) -> None:
         self.need_connect_dashboard_rgw = True

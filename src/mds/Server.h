@@ -117,6 +117,10 @@ enum {
   l_mdss_req_symlink_latency,
   l_mdss_req_unlink_latency,
   l_mdss_cap_revoke_eviction,
+  l_mdss_cache_trim_throttle,
+  l_mdss_session_recall_throttle,
+  l_mdss_session_recall_throttle2o,
+  l_mdss_global_recall_throttle,
   l_mdss_cap_acquisition_throttle,
   l_mdss_req_getvxattr_latency,
   l_mdss_req_file_blockdiff_latency,
@@ -314,6 +318,7 @@ public:
   void handle_client_unlink(const MDRequestRef& mdr);
   bool _dir_is_nonempty_unlocked(const MDRequestRef& mdr, CInode *rmdiri);
   bool _dir_is_nonempty(const MDRequestRef& mdr, CInode *rmdiri);
+  bool _dir_has_snaps(const MDRequestRef& mdr, CInode *diri);
   void _unlink_local(const MDRequestRef& mdr, CDentry *dn, CDentry *straydn);
   void _unlink_local_finish(const MDRequestRef& mdr,
 			    CDentry *dn, CDentry *straydn,

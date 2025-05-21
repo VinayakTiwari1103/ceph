@@ -760,7 +760,7 @@ public:
   }
 
   bool is_inline() const {
-    return poffset.is_relative();
+    return poffset.is_record_relative();
   }
 
   paddr_t get_prior_paddr_and_reset() {
@@ -788,6 +788,25 @@ public:
   bool is_pending_in_trans(transaction_id_t id) const {
     return is_pending() && pending_for_transaction == id;
   }
+
+  enum class viewable_state_t {
+    stable,                // viewable
+    pending,               // viewable
+    invalid,               // unviewable
+    stable_become_retired, // unviewable
+    stable_become_pending, // unviewable
+  };
+
+  /**
+   * is_viewable_by_trans
+   *
+   * Check if this extent is still viewable by transaction t.
+   *
+   * Precondition: *this was previously visible to t, which indicates
+   * this extent is either in the read set of t or created(pending) by t.
+   */
+  std::pair<bool, viewable_state_t>
+  is_viewable_by_trans(Transaction &t);
 
 private:
   template <typename T>
@@ -857,10 +876,12 @@ private:
 
   /// used to wait while in-progress commit completes
   std::optional<seastar::shared_promise<>> io_wait_promise;
+
   void set_io_wait() {
     ceph_assert(!io_wait_promise);
     io_wait_promise = seastar::shared_promise<>();
   }
+
   void complete_io() {
     ceph_assert(io_wait_promise);
     io_wait_promise->set_value();
@@ -1089,8 +1110,7 @@ protected:
   friend class crimson::os::seastore::SegmentedAllocator;
   friend class crimson::os::seastore::TransactionManager;
   friend class crimson::os::seastore::ExtentPlacementManager;
-  template <typename, typename>
-  friend class BtreeNodeMapping;
+  friend class LBAMapping;
   friend class ::btree_lba_manager_test;
   friend class ::lba_btree_test;
   friend class ::btree_test_base;
@@ -1100,6 +1120,7 @@ protected:
 };
 
 std::ostream &operator<<(std::ostream &, CachedExtent::extent_state_t);
+std::ostream &operator<<(std::ostream &, CachedExtent::viewable_state_t);
 std::ostream &operator<<(std::ostream &, const CachedExtent&);
 
 /// Compare extents by paddr
@@ -1291,41 +1312,6 @@ private:
   uint64_t bytes = 0;
 };
 
-template <typename key_t, typename>
-class PhysicalNodeMapping;
-
-template <typename key_t, typename val_t>
-using PhysicalNodeMappingRef = std::unique_ptr<PhysicalNodeMapping<key_t, val_t>>;
-
-template <typename key_t, typename val_t>
-class PhysicalNodeMapping {
-public:
-  PhysicalNodeMapping() = default;
-  PhysicalNodeMapping(const PhysicalNodeMapping&) = delete;
-  virtual extent_len_t get_length() const = 0;
-  virtual val_t get_val() const = 0;
-  virtual key_t get_key() const = 0;
-  virtual bool has_been_invalidated() const = 0;
-  virtual CachedExtentRef get_parent() const = 0;
-  virtual uint16_t get_pos() const = 0;
-  virtual uint32_t get_checksum() const {
-    ceph_abort("impossible");
-    return 0;
-  }
-  virtual bool is_parent_viewable() const = 0;
-  virtual bool is_parent_valid() const = 0;
-  virtual bool parent_modified() const {
-    ceph_abort("impossible");
-    return false;
-  };
-
-  virtual void maybe_fix_pos() {
-    ceph_abort("impossible");
-  }
-
-  virtual ~PhysicalNodeMapping() {}
-};
-
 /**
  * RetiredExtentPlaceholder
  *
@@ -1385,17 +1371,36 @@ class LBAMapping;
  */
 class LogicalCachedExtent : public CachedExtent {
 public:
-  template <typename... T>
-  LogicalCachedExtent(T&&... t) : CachedExtent(std::forward<T>(t)...) {}
+  using CachedExtent::CachedExtent;
+
+  LogicalCachedExtent(const LogicalCachedExtent& other)
+    : CachedExtent(other),
+     seen_by_users(other.seen_by_users) {}
+
+  LogicalCachedExtent(const LogicalCachedExtent& other, share_buffer_t s)
+    : CachedExtent(other, s),
+     seen_by_users(other.seen_by_users) {}
 
   void on_rewrite(Transaction &t, CachedExtent &extent, extent_len_t off) final {
     assert(get_type() == extent.get_type());
     auto &lextent = (LogicalCachedExtent&)extent;
     set_laddr((lextent.get_laddr() + off).checked_to_laddr());
+    seen_by_users = lextent.seen_by_users;
     do_on_rewrite(t, lextent);
   }
 
   virtual void do_on_rewrite(Transaction &t, LogicalCachedExtent &extent) {}
+
+  bool is_seen_by_users() const {
+    return seen_by_users;
+  }
+
+  // handled under TransactionManager,
+  // user should not set this by themselves.
+  void set_seen_by_users() {
+    assert(!seen_by_users);
+    seen_by_users = true;
+  }
 
   bool has_laddr() const {
     return laddr != L_ADDR_NULL;
@@ -1409,8 +1414,6 @@ public:
   void set_laddr(laddr_t nladdr) {
     laddr = nladdr;
   }
-
-  void maybe_set_intermediate_laddr(LBAMapping &mapping);
 
   void apply_delta_and_adjust_crc(
     paddr_t base, const ceph::bufferlist &bl) final {
@@ -1461,6 +1464,12 @@ private:
   // the logical address of the extent, and if shared,
   // it is the intermediate_base, see BtreeLBAMapping comments.
   laddr_t laddr = L_ADDR_NULL;
+
+  // whether the extent has been seen by users since OSD startup,
+  // otherwise, an extent can still be alive if it's dirty or pinned by lru.
+  //
+  // user must initialize the logical extent upon the first access.
+  bool seen_by_users = false;
 };
 
 using LogicalCachedExtentRef = TCachedExtentRef<LogicalCachedExtent>;
@@ -1515,5 +1524,6 @@ using lextent_list_t = addr_extent_list_base_t<
 
 #if FMT_VERSION >= 90000
 template <> struct fmt::formatter<crimson::os::seastore::CachedExtent> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<crimson::os::seastore::CachedExtent::viewable_state_t> : fmt::ostream_formatter {};
 template <> struct fmt::formatter<crimson::os::seastore::LogicalCachedExtent> : fmt::ostream_formatter {};
 #endif

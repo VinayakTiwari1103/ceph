@@ -1902,14 +1902,21 @@ static int send_to_remote_gateway(RGWRESTConn* conn, req_info& info,
 
   ceph::bufferlist response;
   rgw_user user;
-  int ret = conn->forward(dpp(), user, info, nullptr, MAX_REST_RESPONSE, &in_data, &response, null_yield);
-
-  int parse_ret = parser.parse(response.c_str(), response.length());
-  if (parse_ret < 0) {
-    cerr << "failed to parse response" << std::endl;
-    return parse_ret;
+  auto result = conn->forward(dpp(), user, info, MAX_REST_RESPONSE, &in_data, &response, null_yield);
+  if (!result) {
+    return result.error();
   }
-  return ret;
+  int ret = rgw_http_error_to_errno(*result);
+  if (ret < 0) {
+    return ret;
+  }
+
+  ret = parser.parse(response.c_str(), response.length());
+  if (ret < 0) {
+    cerr << "failed to parse response" << std::endl;
+    return ret;
+  }
+  return 0;
 }
 
 static int send_to_url(const string& url,
@@ -1930,14 +1937,21 @@ static int send_to_url(const string& url,
   RGWRESTSimpleRequest req(g_ceph_context, info.method, url, NULL, &params, opt_region);
 
   bufferlist response;
-  int ret = req.forward_request(dpp(), key, info, MAX_REST_RESPONSE, &in_data, &response, null_yield);
-
-  int parse_ret = parser.parse(response.c_str(), response.length());
-  if (parse_ret < 0) {
-    cout << "failed to parse response" << std::endl;
-    return parse_ret;
+  auto result = req.forward_request(dpp(), key, info, MAX_REST_RESPONSE, &in_data, &response, null_yield);
+  if (!result) {
+    return result.error();
   }
-  return ret;
+  int ret = rgw_http_error_to_errno(*result);
+  if (ret < 0) {
+    return ret;
+  }
+
+  ret = parser.parse(response.c_str(), response.length());
+  if (ret < 0) {
+    cout << "failed to parse response" << std::endl;
+    return ret;
+  }
+  return 0;
 }
 
 static int send_to_remote_or_url(RGWRESTConn *conn, const string& url,
@@ -4579,7 +4593,7 @@ int main(int argc, const char **argv)
     if (raw_storage_op) {
       site = rgw::SiteConfig::make_fake();
       driver = DriverManager::get_raw_storage(dpp(), g_ceph_context,
-					      cfg, context_pool, *site);
+					      cfg, context_pool, *site, cfgstore.get());
     } else {
       site = std::make_unique<rgw::SiteConfig>();
       auto r = site->load(dpp(), null_yield, cfgstore.get(), localzonegroup_op);
@@ -4601,6 +4615,7 @@ int main(int argc, const char **argv)
                                         false,
 					false, // No background tasks!
                                         null_yield,
+					cfgstore.get(),
 					need_cache && g_conf()->rgw_cache_enabled,
 					need_gc);
     }
@@ -9823,7 +9838,7 @@ next:
 
   if (opt_cmd == OPT::MDLOG_AUTOTRIM) {
     // need a full history for purging old mdlog periods
-    static_cast<rgw::sal::RadosStore*>(driver)->svc()->mdlog->init_oldest_log_period(null_yield, dpp());
+    static_cast<rgw::sal::RadosStore*>(driver)->svc()->mdlog->init_oldest_log_period(null_yield, dpp(), cfgstore.get());
 
     RGWCoroutinesManager crs(driver->ctx(), driver->get_cr_registry());
     RGWHTTPManager http(driver->ctx(), crs.get_completion_mgr());
@@ -9972,7 +9987,7 @@ next:
       return -ret;
     }
 
-    ret = sync.run(dpp(), null_yield);
+    ret = sync.run(dpp(), null_yield, cfgstore.get());
     if (ret < 0) {
       cerr << "ERROR: sync.run() returned ret=" << ret << std::endl;
       return -ret;
@@ -10091,7 +10106,7 @@ next:
       return -ret;
     }
 
-    ret = sync.run(dpp());
+    ret = sync.run(dpp(), cfgstore.get());
     if (ret < 0) {
       cerr << "ERROR: sync.run() returned ret=" << ret << std::endl;
       return -ret;
@@ -10716,7 +10731,7 @@ next:
     if (!rgw::sal::User::empty(user)) {
       pipe->params.user = user->get_id();
     } else if (pipe->params.mode == rgw_sync_pipe_params::MODE_USER &&
-               pipe->params.user.empty()) {
+               !pipe->params.user.has_value()) {
       cerr << "ERROR: missing --uid for --mode=user" << std::endl;
       return EINVAL;
     }

@@ -2444,7 +2444,7 @@ OSD::OSD(CephContext *cct_,
       } else {
         // This should never happen
         dout(0) << "Invalid value passed for 'osd_op_queue': " << type << dendl;
-        ceph_assert(0 == "Unsupported op queue type");
+        ceph_abort_msg("Unsupported op queue type");
       }
     } else {
       static const std::vector<op_queue_type_t> index_lookup = {
@@ -3488,10 +3488,14 @@ int OSD::run_osd_bench_test(
     bsize = osize;
   }
 
-  dout(1) << " bench count " << count
-          << " bsize " << byte_u_t(bsize) << dendl;
+  dout(0) << " bench count " << count
+          << " bsize " << byte_u_t(bsize)
+          << " onum " << onum
+          << " osize " << byte_u_t(osize)
+          << dendl;
 
   ObjectStore::Transaction cleanupt;
+  utime_t start = ceph_clock_now();
 
   if (osize && onum) {
     bufferlist bl;
@@ -3517,9 +3521,13 @@ int OSD::run_osd_bench_test(
       waiter.wait();
     }
   }
+  dout(0) << __func__
+          << " prefill took " << ceph_clock_now() - start
+          << dendl;
 
+
+  start = ceph_clock_now();
   bufferlist bl;
-  utime_t start = ceph_clock_now();
   for (int64_t pos = 0; pos < count; pos += bsize) {
     char nm[34];
     unsigned offset = 0;
@@ -3552,6 +3560,9 @@ int OSD::run_osd_bench_test(
   }
   utime_t end = ceph_clock_now();
   *elapsed = end - start;
+  dout(0) << __func__
+          << " benchmark took " << *elapsed
+          << dendl;
 
   // clean up
   store->queue_transaction(service.meta_ch, std::move(cleanupt), nullptr);
@@ -6274,12 +6285,9 @@ void OSD::heartbeat_check()
 void OSD::heartbeat()
 {
   ceph_assert(ceph_mutex_is_locked_by_me(heartbeat_lock));
-  dout(30) << "heartbeat" << dendl;
-
-  auto load_for_logger = service.get_scrub_services().update_load_average();
-  if (load_for_logger) {
-    logger->set(l_osd_loadavg, load_for_logger.value());
-  }
+  logger->set(
+      l_osd_loadavg,
+      100.0 * service.get_scrub_services().update_load_average().value_or(0.0));
   dout(30) << "heartbeat checking stats" << dendl;
 
   // refresh peer list and osd stats
@@ -10586,7 +10594,7 @@ void OSD::get_latest_osdmap()
 // --------------------------------
 
 void OSD::set_perf_queries(const ConfigPayload &config_payload) {
-  const OSDConfigPayload &osd_config_payload = boost::get<OSDConfigPayload>(config_payload);
+  const OSDConfigPayload &osd_config_payload = std::get<OSDConfigPayload>(config_payload);
   const std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> &queries = osd_config_payload.config;
   dout(10) << "setting " << queries.size() << " queries" << dendl;
 

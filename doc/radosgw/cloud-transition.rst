@@ -147,7 +147,7 @@ How to Configure
 
 See :ref:`adding_a_storage_class` for how to configure storage-class for a zonegroup. The cloud transition requires a creation of a special storage class with tier type defined as ``cloud-s3`` or ``cloud-s3-glacier``
 
-.. note:: If you have not performed previous `Multisite Configuration`_,
+.. note:: If you have not performed previous :ref:`Multisite Configuration <multisite>`,
           a ``default`` zone and zonegroup are created for you, and changes
           to the zone/zonegroup will not take effect until the Ceph Object
           Gateways (RGW daemons) are restarted. If you have created a realm for multisite,
@@ -353,8 +353,9 @@ attributes are added to the objects being transitioned:
 
    If set to default ``true``, the cloud service should map and store all
    ``the x-amz-meta-*`` attributes. If it cannot, then the operation should fail.
-    if set to ``false``, the cloud service can ignore such attributes and
-    just store the object data being sent.
+
+   If set to ``false``, the cloud service can ignore such attributes and
+   just store the object data being sent.
 
 By default, post-transition, the source object gets deleted. But it is possible
 to retain its metadata with updated values (including ``storage-class``
@@ -426,5 +427,3 @@ Future Work
 * Support s3:RestoreObject operation on cloud transitioned objects.
 
 * Support transition to other cloud providers (like Azure).
-
-.. _`Multisite Configuration`: ../multisite

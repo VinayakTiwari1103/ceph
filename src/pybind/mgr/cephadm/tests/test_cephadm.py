@@ -394,19 +394,20 @@ class TestCephadm(object):
                 assert wait(cephadm_module,
                             c) == f"Scheduled to redeploy rgw.{daemon_id} on host 'test'"
 
-                for what in ('start', 'stop'):
-                    c = cephadm_module.daemon_action(what, d_name)
-                    assert wait(cephadm_module,
-                                c) == F"Scheduled to {what} {d_name} on host 'test'"
+                c = cephadm_module.daemon_action('start', d_name)
+                assert wait(cephadm_module,
+                            c) == F"Scheduled to start {d_name} on host 'test'"
 
                 for what in ('start', 'stop', 'restart'):
                     c = cephadm_module.daemon_action(what, d_name, force=True)
                     assert wait(cephadm_module,
                                 c) == F"Scheduled to {what} {d_name} on host 'test'"
 
-                with pytest.raises(OrchestratorError, match=f"Unable to restart daemon {d_name}"):
-                    c = cephadm_module.daemon_action('restart', d_name)
-                    wait(cephadm_module, c)
+                for what in ('stop', 'restart'):
+                    with pytest.raises(OrchestratorError, match=f"Unable to {what} daemon {d_name}"):
+                        c = cephadm_module.daemon_action(what, d_name)
+                        wait(cephadm_module, c)
+
                 # Make sure, _check_daemons does a redeploy due to monmap change:
                 cephadm_module._store['_ceph_get/mon_map'] = {
                     'modified': datetime_to_str(datetime_now()),
@@ -1209,7 +1210,7 @@ class TestCephadm(object):
                                 data_devices=DeviceSelection(paths=['']))
             c = cephadm_module.create_osds(dg)
             out = wait(cephadm_module, c)
-            assert out == "Created no osd(s) on host test; already created?"
+            assert "Error: No devices found for host test." in out
             bad_dg = DriveGroupSpec(placement=PlacementSpec(host_pattern='invalid_host'),
                                     data_devices=DeviceSelection(paths=['']))
             c = cephadm_module.create_osds(bad_dg)
@@ -1223,7 +1224,7 @@ class TestCephadm(object):
                                 data_devices=DeviceSelection(paths=['']))
             c = cephadm_module.create_osds(dg)
             out = wait(cephadm_module, c)
-            assert out == "Created no osd(s) on host test; already created?"
+            assert "Error: No devices found for host test." in out
 
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('{}'))
     @mock.patch('cephadm.services.osd.OSDService._run_ceph_volume_command')
@@ -2663,6 +2664,16 @@ Traceback (most recent call last):
         with pytest.raises(OrchestratorError, match=r"Cannot find host 'host1' in the inventory."):
             cephadm_module.drain_host('host1', force=True, zap_osd_devices=True)
             _rm_osds.assert_called_with([], zap=True)
+
+    @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('[]'))
+    @mock.patch("cephadm.CephadmOrchestrator.stop_remove_osds")
+    @mock.patch("cephadm.inventory.HostCache.get_daemons_by_host", lambda *a, **kw: [])
+    def test_stop_host_drain(self, _stop_rm_osds, cephadm_module):
+        # pass force=true in these tests to bypass _admin label check
+        with with_host(cephadm_module, 'host1', refresh_hosts=False, rm_with_force=True):
+            cephadm_module.drain_host('host1')
+            cephadm_module.stop_drain_host('host1')
+            _stop_rm_osds.assert_called_with([])
 
     def test_process_ls_output(self, cephadm_module):
         sample_ls_output = """[

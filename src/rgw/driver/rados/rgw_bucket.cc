@@ -1476,8 +1476,9 @@ int RGWBucketAdminOp::remove_bucket(rgw::sal::Driver* driver, const rgw::SiteCon
   env.set("REQUEST_URI", delpath);
   env.set("QUERY_STRING", fmt::format("bucket={}&tenant={}", bucket->get_name(), bucket->get_tenant()));
   req_info req(dpp->get_cct(), &env);
+  rgw_err err; // unused
 
-  ret = rgw_forward_request_to_master(dpp, site, bucket->get_owner(), nullptr, nullptr, req, y);
+  ret = rgw_forward_request_to_master(dpp, site, bucket->get_owner(), nullptr, nullptr, req, err, y);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: failed to forward request to master zonegroup: "
                       << ret << dendl;
@@ -2974,7 +2975,8 @@ int RGWBucketInstanceMetadataHandler::put_post(
       lc_it = old_bci->attrs.find(RGW_ATTR_LC);
       if (lc_it != old_bci->attrs.end()) {
         ldpp_dout(dpp, 20) << "remove lc config for " << old_bci->info.bucket.name << dendl;
-        ret = lc->remove_bucket_config(dpp, y, bucket.get(), old_bci->attrs, false /* cannot merge attrs */);
+        constexpr bool update_attrs = false;
+        ret = lc->remove_bucket_config(dpp, y, bucket.get(), update_attrs);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << __func__ << " failed to remove lc config for "
               << old_bci->info.bucket.name
