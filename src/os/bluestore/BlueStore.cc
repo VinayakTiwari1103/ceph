@@ -17664,6 +17664,7 @@ int BlueStore::_do_write_v2_compressed(
   o->extent_map.fault_range(db, scan_left, scan_right - scan_left);
   if (!c->estimator) c->estimator.reset(create_estimator());
   Estimator* estimator = c->estimator.get();
+  estimator->set_wctx(&wctx);
   Scanner scanner(this);
   scanner.write_lookaround(o.get(), offset, length, scan_left, scan_right, estimator);
   std::vector<Estimator::region_t> regions;
@@ -17698,9 +17699,7 @@ int BlueStore::_do_write_v2_compressed(
     int32_t disk_for_compressed;
     int32_t disk_for_raw;
     uint32_t au_size = min_alloc_size;
-    uint32_t max_blob_size = c->pool_opts.value_or(
-      pool_opts_t::COMPRESSION_MAX_BLOB_SIZE, (int64_t)comp_max_blob_size.load());
-    disk_for_compressed = estimator->split_and_compress(wctx.compressor, max_blob_size, data_bl, bd);
+    disk_for_compressed = estimator->split_and_compress(data_bl, bd);
     disk_for_raw = p2roundup(i.offset + i.length, au_size) - p2align(i.offset, au_size);
     BlueStore::Writer wr(this, txc, &wctx, o);
     if (disk_for_compressed < disk_for_raw) {
@@ -19678,13 +19677,13 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
     sout.width(width);
     switch (l + LEVEL_FIRST) {
     case LEVEL_LOG:
-      sout << "LOG"; break;
+      sout << "log"; break;
     case LEVEL_WAL:
-      sout << "WAL"; break;
+      sout << "db.wal"; break;
     case LEVEL_DB:
-      sout << "DB"; break;
+      sout << "db"; break;
     case LEVEL_SLOW:
-      sout << "SLOW"; break;
+      sout << "db.slow"; break;
     case LEVEL_MAX:
       sout << "TOTAL"; break;
     }
@@ -19705,13 +19704,13 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
     sout.width(width);
     switch (l + LEVEL_FIRST) {
     case LEVEL_LOG:
-      sout << "LOG"; break;
+      sout << "log"; break;
     case LEVEL_WAL:
-      sout << "WAL"; break;
+      sout << "db.wal"; break;
     case LEVEL_DB:
-      sout << "DB"; break;
+      sout << "db"; break;
     case LEVEL_SLOW:
-      sout << "SLOW"; break;
+      sout << "db.slow"; break;
     case LEVEL_MAX:
       sout << "TOTAL"; break;
     }
