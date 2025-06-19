@@ -5411,13 +5411,12 @@ boost::statechart::result
 PeeringState::Backfilling::react(const DeferBackfill &c)
 {
   DECLARE_LOCALS;
-
-  psdout(10) << "defer backfill, retry delay " << c.delay << dendl;
-  ps->state_set(PG_STATE_BACKFILL_WAIT);
-  ps->state_clear(PG_STATE_BACKFILLING);
-  suspend_backfill();
-
   if (ps->needs_backfill()) {
+    psdout(10) << "defer backfill, retry delay " << c.delay << dendl;
+    ps->state_set(PG_STATE_BACKFILL_WAIT);
+    ps->state_clear(PG_STATE_BACKFILLING);
+    suspend_backfill();
+
     pl->schedule_event_after(
       std::make_shared<PGPeeringEvent>(
 	ps->get_osdmap_epoch(),
@@ -5427,6 +5426,9 @@ PeeringState::Backfilling::react(const DeferBackfill &c)
     return transit<NotBackfilling>();
   } else {
     // raced with MOSDPGBackfill::OP_BACKFILL_FINISH, ignore
+    psdout(10) << "discarding stale DeferBackfill event , pg does not need "
+		  "backfill anymore"
+	       << dendl;
     return discard_event();
   }
 }
@@ -6004,6 +6006,18 @@ PeeringState::WaitLocalRecoveryReserved::react(const RecoveryTooFull &evt)
   return transit<NotRecovering>();
 }
 
+boost::statechart::result
+PeeringState::WaitLocalRecoveryReserved::react(const AdvMap& ev)
+{
+  DECLARE_LOCALS;
+  if (!ps->cct->_conf->osd_debug_skip_full_check_in_recovery &&
+      ps->get_osdmap()->check_full(ps->acting_recovery_backfill)) {
+    post_event(RecoveryTooFull());
+    return discard_event();
+  }
+  return forward_event();
+}
+
 void PeeringState::WaitLocalRecoveryReserved::exit()
 {
   context< PeeringMachine >().log_exit(state_name, enter_time);
@@ -6042,6 +6056,18 @@ PeeringState::WaitRemoteRecoveryReserved::react(const RemoteRecoveryReserved &ev
     post_event(AllRemotesReserved());
   }
   return discard_event();
+}
+
+boost::statechart::result
+PeeringState::WaitRemoteRecoveryReserved::react(const AdvMap& ev)
+{
+  DECLARE_LOCALS;
+  if (!ps->cct->_conf->osd_debug_skip_full_check_in_recovery &&
+      ps->get_osdmap()->check_full(ps->acting_recovery_backfill)) {
+    post_event(RecoveryTooFull());
+    return discard_event();
+  }
+  return forward_event();
 }
 
 void PeeringState::WaitRemoteRecoveryReserved::exit()

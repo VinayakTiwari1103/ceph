@@ -1988,7 +1988,7 @@ static int commit_period(rgw::sal::ConfigStore* cfgstore,
                          RGWPeriod& period, string remote, const string& url,
                          std::optional<string> opt_region,
                          const string& access, const string& secret,
-                         bool force)
+                         bool force, rgw::SiteConfig* site)
 {
   auto& master_zone = period.get_master_zone().id;
   if (master_zone.empty()) {
@@ -2008,7 +2008,7 @@ static int commit_period(rgw::sal::ConfigStore* cfgstore,
     // the master zone can commit locally
     ret = rgw::commit_period(dpp(), null_yield, cfgstore, driver,
                              realm, realm_writer, current_period,
-                             period, cerr, force);
+                             period, cerr, force, *site);
     if (ret < 0) {
       cerr << "failed to commit period: " << cpp_strerror(-ret) << std::endl;
     }
@@ -2095,7 +2095,7 @@ static int update_period(rgw::sal::ConfigStore* cfgstore,
                          const string& remote, const string& url,
                          std::optional<string> opt_region,
                          const string& access, const string& secret,
-                         Formatter *formatter, bool force)
+                         Formatter *formatter, bool force, rgw::SiteConfig* site)
 {
   RGWRealm realm;
   std::unique_ptr<rgw::sal::RealmWriter> realm_writer;
@@ -2133,7 +2133,7 @@ static int update_period(rgw::sal::ConfigStore* cfgstore,
   }
   if (commit) {
     ret = commit_period(cfgstore, realm, *realm_writer, period, remote, url,
-                        opt_region, access, secret, force);
+                        opt_region, access, secret, force, site);
     if (ret < 0) {
       cerr << "failed to commit period: " << cpp_strerror(-ret) << std::endl;
       return ret;
@@ -4890,7 +4890,7 @@ int main(int argc, const char **argv)
         int ret = update_period(cfgstore.get(), realm_id, realm_name,
                                 period_epoch, commit, remote, url,
                                 opt_region, access_key, secret_key,
-                                formatter.get(), yes_i_really_mean_it);
+                                formatter.get(), yes_i_really_mean_it, site.get());
 	if (ret < 0) {
 	  return -ret;
 	}
@@ -5337,7 +5337,7 @@ int main(int argc, const char **argv)
 	} else {
           ret = writer->write(dpp(), null_yield, realm);
 	  if (ret < 0) {
-	    cerr << "ERROR: couldn't driver realm info: " << cpp_strerror(-ret) << std::endl;
+	    cerr << "ERROR: couldn't write realm info: " << cpp_strerror(-ret) << std::endl;
 	    return 1;
 	  }
 	}
@@ -7040,7 +7040,7 @@ int main(int argc, const char **argv)
       int ret = update_period(cfgstore.get(), realm_id, realm_name,
                               period_epoch, commit, remote, url,
                               opt_region, access_key, secret_key,
-                              formatter.get(), yes_i_really_mean_it);
+                              formatter.get(), yes_i_really_mean_it, site.get());
       if (ret < 0) {
 	return -ret;
       }
@@ -7069,7 +7069,7 @@ int main(int argc, const char **argv)
       }
       ret = commit_period(cfgstore.get(), realm, *realm_writer, period,
                           remote, url, opt_region, access_key, secret_key,
-                          yes_i_really_mean_it);
+                          yes_i_really_mean_it, site.get());
       if (ret < 0) {
         cerr << "failed to commit period: " << cpp_strerror(-ret) << std::endl;
         return -ret;
@@ -7832,11 +7832,18 @@ int main(int argc, const char **argv)
       cerr << "ERROR: failed to get pending logging object name from target bucket '" << configuration.target_bucket << "'" << std::endl;
       return -ret;
     }
-    const auto old_obj = obj_name;
-    ret = rgw::bucketlogging::rollover_logging_object(configuration, target_bucket, obj_name, dpp(), null_yield, true, &objv_tracker);
+    std::string old_obj;
+    const auto region = driver->get_zone()->get_zonegroup().get_api_name();
+    ret = rgw::bucketlogging::rollover_logging_object(configuration, target_bucket, obj_name, dpp(), region, bucket, null_yield, true, &objv_tracker, &old_obj);
     if (ret < 0) {
-      cerr << "ERROR: failed to flush pending logging object '" << old_obj
-        << "' to target bucket '" << configuration.target_bucket << "'" << std::endl;
+      if (ret == -ENOENT) {
+        cerr << "WARNING: no pending logging object '" << obj_name << "'. nothing to flush";
+        ret = 0;
+      } else {
+        cerr << "ERROR: failed flush pending logging object '" << obj_name << "'";
+      }
+      cerr << " to target bucket '" << configuration.target_bucket << "'. "
+        << " last committed object is '" << old_obj << "'" << std::endl;
       return -ret;
     }
     cout << "flushed pending logging object '" << old_obj
