@@ -316,8 +316,10 @@ class CephMgrCommands(Directive):
             ms = [c for c in mgr_mod.__dict__.values()
                   if subclass(c) and 'Standby' not in c.__name__]
             [m] = ms
-            assert isinstance(m.COMMANDS, list)
-            return m.COMMANDS
+            commands = getattr(m, 'COMMANDS', None)
+            if not isinstance(commands, list):
+                return []
+            return commands
 
     def _normalize_command(self, command):
         if 'handler' in command:
